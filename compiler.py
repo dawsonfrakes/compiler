@@ -63,6 +63,7 @@ class Code_Node_Kind(IntEnum):
     IDENT = 7
     CALL = 8
     NUMBER = 9
+    FIELD = 10
 
 @dataclass
 class Code_Node:
@@ -122,6 +123,12 @@ class Code_Number(Code_Node):
     kind = Code_Node_Kind.NUMBER
     value: Token
 
+@dataclass
+class Code_Field(Code_Node):
+    kind = Code_Node_Kind.FIELD
+    path: Code_Node
+    field: Token
+
 class Parser:
     def __init__(self, s: str) -> None:
         self.s, self.p = s, 0
@@ -147,7 +154,7 @@ class Parser:
         elif self.s[p].isdigit():
             kind = TokenKind.NUMBER
             while p + l < len(self.s) and self.s[p + l].isdigit(): l += 1
-        elif self.s[p] in ":=+-*/<>(){}[]": kind = ord(self.s[p])
+        elif self.s[p] in ".:=+-*/<>(){}[]": kind = ord(self.s[p])
         else:
             kind = TokenKind.ERROR
         return Token(p, l, int(kind))
@@ -240,7 +247,12 @@ class Parser:
             number = self.eat(TokenKind.NUMBER)
             result = Code_Number(Code_Node_Kind.NUMBER, number)
 
-        if result == None: raise NotImplementedError(TokenKind.as_str(token.kind))
+        if result is None: raise NotImplementedError(TokenKind.as_str(token.kind))
+
+        if self.peek().kind == ord('.'):
+            self.eat(ord('.'))
+            field = self.eat(TokenKind.IDENTIFIER)
+            result = Code_Field(Code_Node_Kind.FIELD, result, field)
 
         if self.peek().kind == ord('('):
             self.eat(ord('('))
@@ -248,8 +260,9 @@ class Parser:
             while self.peek().kind != ord(')'):
                 args.append(self.parse_expression())
             self.eat(ord(')'))
-            return Code_Call(Code_Node_Kind.CALL, result, args)
-        elif result is not None: return result
+            result = Code_Call(Code_Node_Kind.CALL, result, args)
+
+        if result is not None: return result
         raise NotImplementedError(TokenKind.as_str(token.kind))
 
     def parse_declaration(self) -> Code_Declaration:
@@ -270,7 +283,36 @@ class Parser:
         result = []
         while parser.peek().kind != TokenKind.EOF:
             decl = parser.parse_declaration()
+            print(decl)
             result.append(decl)
+        return result
+
+class CVisitor:
+    def __init__(self, parser: Parser) -> None:
+        self.parser = parser
+
+    def visit(self, node: Code_Node):
+        if node.kind == Code_Node_Kind.IDENT:
+            return self.parser.s[node.token.offset:][:node.token.length]
+        if node.kind == Code_Node_Kind.DECLARATION:
+            result = ""
+            name = self.parser.s[node.identifier.offset:][:node.identifier.length]
+            value_expr = node.value_expr
+            if value_expr.kind == Code_Node_Kind.STRUCT:
+                result += f"struct {name} {{\n"
+                result += "};\n\n"
+                return result
+            if value_expr.kind == Code_Node_Kind.PROCEDURE_BODY:
+                result += f"void {name}() {{"
+                result += "}\n\n"
+                return result
+            raise NotImplementedError(value_expr.kind.name)
+        raise NotImplementedError(node.kind.name)
+
+    def visit_module(self, module: list[Code_Node]) -> str:
+        result = ""
+        for node in module:
+            result += self.visit(node)
         return result
 
 src = """
@@ -279,8 +321,12 @@ kernel32 :: struct {
 }
 
 RawEntryPoint :: proc () callconv(WINAPI) noreturn {
-    ExitProcess(0)
+    kernel32.ExitProcess(0)
 }
 """
+
 parser = Parser(src)
-print(parser.parse_module())
+module = parser.parse_module()
+for node in module: print(f"{node}\n")
+visitor = CVisitor(parser)
+print(visitor.visit_module(module))
