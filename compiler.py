@@ -1,18 +1,23 @@
-class List(list):
-    def __repr__(self) -> str: return '(' + " ".join([repr(member) for member in self]) + ')'
 class Symbol(str):
     def __repr__(self) -> str: return self
-class Number(float): pass
-class EnumLiteral(str):
-    def __repr__(self) -> str: return self
-Atom = Symbol | EnumLiteral | Number
-Exp = List | Atom
+class String(str): pass
+class ComptimeInt(int): pass
+Atom = Symbol | String | ComptimeInt
+class List(list): pass
+Exp = Atom | List
 
-def read(s: list) -> Exp | None:
+def parse_exp(s: list[str]) -> Exp | None:
     stack = []
     level = 0
     while True:
-        while len(s) != 0 and s[-1].isspace(): s.pop()
+        while True:
+            while len(s) > 0 and s[-1].isspace(): s.pop()
+            if len(s) == 0: break
+            if s[-1] == ';':
+                while len(s) > 0 and s[-1] != '\n': s.pop()
+                continue
+            else:
+                break
         if len(s) == 0: break
         c = s.pop()
         if c == '(':
@@ -22,171 +27,121 @@ def read(s: list) -> Exp | None:
         if c == ')':
             level -= 1
             x = stack.pop()
-            (stack[-1] if len(stack) != 0 else stack).append(x)
-        elif c == '.':
-            while len(s) > 0 and (s[-1].isalnum() or s[-1] in "+-*/_="): c += s.pop()
-            (stack[-1] if len(stack) != 0 else stack).append(EnumLiteral(c))
+            (stack[-1] if len(stack) > 0 else stack).append(x)
         elif c.isdigit():
-            while len(s) > 0 and (s[-1].isdigit() or s[-1] in "."): c += s.pop()
-            (stack[-1] if len(stack) != 0 else stack).append(Number(c))
-        elif c.isalpha() or c in "+-*/_=":
+            while len(s) > 0 and s[-1].isdigit(): c += s.pop()
+            (stack[-1] if len(stack) > 0 else stack).append(ComptimeInt(c))
+        elif c == '"':
+            while len(s) > 0 and ((len(s) > 1 and s[-2] == '\\') or s[-1] != '"'): c += s.pop()
+            assert len(s) > 0 and s[-1] == '"'
+            c += s.pop()
+            (stack[-1] if len(stack) > 0 else stack).append(String(c[1:-1]))
+        elif c.isalpha or c in "+-*/_=":
             while len(s) > 0 and (s[-1].isalnum() or s[-1] in "+-*/_="): c += s.pop()
-            (stack[-1] if len(stack) != 0 else stack).append(Symbol(c))
-        else: raise NotImplementedError(c)
+            (stack[-1] if len(stack) > 0 else stack).append(Symbol(c))
         if level == 0 and len(stack) == 1: break
     assert len(stack) <= 1
     return stack[0] if len(stack) != 0 else None
 
+class Env(dict): pass
 from dataclasses import dataclass
-
 @dataclass
 class Enum:
-    names: list[Symbol]
-    values: list[Exp]
-
+    names: List[Symbol]
+    values: List[ComptimeInt]
 @dataclass
 class EnumField:
-    type_: Exp
-    field: Symbol
+    container_exp: Exp
+    name: String
 
-@dataclass
-class Proto:
-    params: list[Exp]
-    callconv: Exp
-    ret_type: Exp
-
-@dataclass
-class Integer:
-    bits: int
-    signed: bool
-
-@dataclass
-class Noreturn:
-    pass
-
-@dataclass
-class CUint:
-    pass
-
-env = {"c-uint": CUint(), "noreturn": Noreturn(), "CPU_Endianness": Enum([Symbol("x86")], [0.0]), "CPU": EnumField(Symbol("CPU_Endianness"), Symbol("x86"))}
-def doeval(x: Exp) -> Exp | bool | None:
+def doeval(x: Exp, env: Env) -> Exp | None:
     if not isinstance(x, List):
-        if isinstance(x, Symbol):
-            result = env[x]
-            return result
-        return x
-    op, *args = x
-    if op == Symbol("const"):
-        name, value = args
-        assert isinstance(name, Symbol)
-        assert name not in env
-        value = doeval(value)
-        env[name] = value
-        return None
-    elif op == Symbol("proto"):
-        params, callconv, ret_type = args
-        params = [doeval(param) for param in params]
-        callconv = doeval(callconv)
-        ret_type = doeval(ret_type)
-        return Proto(params, callconv, ret_type)
-    elif op == Symbol("if"):
-        test, conseq, alt = args
-        return doeval(conseq) if doeval(test) else doeval(alt)
-    elif op == Symbol("enum"):
-        names, values = args[::2], args[1::2]
-        assert all([isinstance(name, Symbol) for name in names])
-        values = [doeval(value) for value in values]
-        return Enum(names, values)
-    elif op == Symbol("=="):
-        lhs, rhs = args
-        lhs = doeval(lhs)
-        rhs = doeval(rhs)
-        return lhs == rhs
-    raise NotImplementedError(op)
-
-def cify_callconv(x: EnumLiteral) -> str:
-    if x == EnumLiteral(".c"):
-        return "__cdecl"
-    if x == EnumLiteral(".stdcall"):
-        return "__stdcall"
-
-def cify_function(type_: Exp, name: str) -> str:
-    type_ = doeval(type_)
-    arg_list = ", ".join([cify(param) for param in type_.params]) if len(type_.params) > 0 else "void"
-    return cify(type_.ret_type) + " " + cify_callconv(type_.callconv) + " " + repr(name) + "(" + arg_list + ")"
-
-cify_env = {}
-def cify(x: Exp) -> str:
-    if not isinstance(x, List):
-        if isinstance(x, Noreturn): return "Noreturn"
-        if isinstance(x, CUint): return "unsigned int"
-        if x in cify_env: return cify_env[x]
-        if isinstance(x, Number): return x
+        if isinstance(x, Symbol): return env[x]
+        if isinstance(x, String | ComptimeInt): return x
         raise NotImplementedError(x)
     op, *args = x
-    if op == Symbol("const"):
-        name, value = args
-        assert isinstance(name, Symbol)
-        # value = doeval(value)
-        doeval(x)
-        return None
-        # return f"// #define {name} {value}"
-    elif op == Symbol("extern"):
-        name, type_ = args
-        assert isinstance(name, Symbol)
-        cify_env[name] = repr(name)
-        return cify_function(type_, name) + ";\n"
-    elif op == Symbol("enum"):
-        names, values = args[::2], args[1::2]
-        return f"enum {{ {names} {values} }};"
-    elif op == Symbol("proto"):
-        name, type_ = args
-        assert isinstance(name, Symbol)
-        return cify_function(type_, name)
-    elif op == Symbol("proc"):
-        name, params, callconv, ret_type, *body = args
-        assert isinstance(name, Symbol)
-        fn = cify_function(Proto([doeval(param) for param in params], doeval(callconv), doeval(ret_type)), name)
-        body = [cify(statement) for statement in body]
-        return f"{fn} {{{"\n\t" + ";\n\t".join(body) + ";\n"}}}"
-    elif op == Symbol("if"):
-        test, conseq, alt = args
-        test = cify(test)
-        conseq = cify(conseq)
-        alt = cify(alt)
-        return f"{test} ? {conseq} : {alt}"
-    elif op == Symbol("=="):
-        lhs, rhs = args
-        lhs = cify(lhs)
-        rhs = cify(rhs)
-        return f"{lhs} == {rhs}"
-    else:
-        proc, *pargs = x
-        proc = cify(proc)
-        pargs = [cify(arg) for arg in pargs]
-        return f"{proc}({", ".join([repr(arg) for arg in pargs])})"
+    if op == Symbol("enum"):
+        names, values = List(args[0::2]), List(args[1::2])
+        assert all([isinstance(name, Symbol) for name in names])
+        values = [doeval(value, env) for value in values]
+        assert all([isinstance(value, ComptimeInt) for value in values])
+        return Enum(names, values)
+    elif op == Symbol("field"):
+        container_exp, name = args
+        container = doeval(container_exp, env)
+        assert isinstance(container, Enum)
+        name = doeval(name, env)
+        assert isinstance(name, String)
+        return EnumField(container_exp, name)
     raise NotImplementedError(op)
 
-src = """
-(const CallingConvention (enum
-    default 0
-    c 1
-    stdcall 2))
-(const WINAPI (if (== CPU .x86) (field CallingConvention .stdcall) .c))
-(extern ExitProcess (proto (c-uint) WINAPI noreturn))
-(proc RawEntryPoint () WINAPI noreturn
- (ExitProcess 0))
-"""
+class Cify:
+    def __init__(self) -> None:
+        self.env = Env()
 
-cify_preamble = """
+    def visit(self, x: Exp, env) -> None:
+        if not isinstance(x, List):
+            raise NotImplementedError(x)
+        op, *args = x
+        if op == Symbol("const"):
+            name, value = args
+            assert isinstance(name, Symbol)
+            value = doeval(value, env)
+            env[name] = value
+            return None
+        raise NotImplementedError(op)
+
+    def finalize(self) -> str:
+        result = ""
+        result += """
+/* BEGIN GENERATED SOURCE */
 #define Noreturn void
-"""
-print(cify_preamble)
 
+"""
+        result += "/* ENUMS */\n"
+        for v in self.env:
+            if isinstance(self.env[v], Enum):
+                for name, value in zip(self.env[v].names, self.env[v].values):
+                    result += f"#define {v}_{name} {value}\n"
+            elif isinstance(self.env[v], EnumField):
+                container = doeval(self.env[v].container_exp, self.env)
+                names, values = container.names, container.values
+                name = self.env[v].name
+                assert name in names
+                result += f"#define {v} {self.env[v].container_exp}_{name}"
+            else: raise NotImplementedError(self.env[v])
+            result += "\n"
+        result += f"""/* DEFINES */
+#if defined(__x86_64__) || defined(_M_AMD64)
+#define CPU CPU_Target_amd64
+#else
+#define CPU CPU_Target_unknown
+#endif
+
+"""
+        result += """/* END GENERATED SOURCE */"""
+        return result
+
+src = """
+(const CPU_Target (enum
+ unknown 0
+ x64 1
+ arm64 2))
+(const CallingConvention (enum
+ default 0
+ c 1
+ stdcall 2))
+; (proc RawEntryPoint () WINAPI noreturn)
+(const WINAPI (field CallingConvention "c"))
+"""
 src_rev = list(reversed(src))
+cify = Cify()
 while True:
-    exp = read(src_rev)
+    exp = parse_exp(src_rev)
     if exp is None: break
-    # print(exp)
-    result = cify(exp)
+    print(exp)
+    result = cify.visit(exp, cify.env)
+    print(cify.env)
     if result is not None: print(result)
+assert len(src_rev) == 0
+print(cify.finalize())
